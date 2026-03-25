@@ -63,14 +63,6 @@ body{font-family:var(--font);background:var(--bg);color:var(--text);display:flex
 .vc-btn{padding:6px 14px;border-radius:6px;border:none;font-size:13px;font-family:var(--font);cursor:pointer;font-weight:500}
 .btn-join{background:var(--green);color:#fff}
 .btn-leave{background:var(--red);color:#fff}
-.btn-mute,.btn-screen{background:var(--input-bg);color:var(--text)}
-.btn-mute.muted,.btn-screen.sharing{background:var(--accent);color:#fff}
-.peers-area{flex:1;overflow:auto;display:grid;gap:8px;padding:12px;align-content:start}
-.peer-tile{background:#111;border-radius:10px;overflow:hidden;position:relative;aspect-ratio:16/9}
-.peer-tile video{width:100%;height:100%;object-fit:contain;background:#000;display:block}
-.peer-av-c{position:absolute;inset:0;display:flex;align-items:center;justify-content:center}
-.peer-label{position:absolute;bottom:6px;left:8px;font-size:12px;font-weight:600;color:#fff;background:rgba(0,0,0,.6);padding:2px 8px;border-radius:4px}
-.local-tile{border:1px solid var(--border)}
 #login-overlay{position:absolute;inset:0;background:var(--bg);display:flex;align-items:center;justify-content:center;z-index:100}
 .login-card{background:var(--sidebar);border-radius:12px;padding:32px;width:320px;display:flex;flex-direction:column;gap:16px}
 .login-card h2{font-size:20px;font-weight:700;color:var(--white)}
@@ -142,14 +134,8 @@ body{font-family:var(--font);background:var(--bg);color:var(--text);display:flex
         <span class="vc-status" id="vc-status">Не подключён</span>
         <button class="vc-btn btn-join" id="btn-join" onclick="joinVoice()">Подключиться</button>
         <button class="vc-btn btn-leave" id="btn-leave" onclick="leaveVoice()" style="display:none">Выйти</button>
-        <button class="vc-btn btn-mute" id="btn-mute" onclick="toggleMute()" style="display:none">🎙 Микрофон вкл</button>
-        <button class="vc-btn btn-screen" id="btn-screen" onclick="toggleScreen()" style="display:none">🖥 Показать экран</button>
       </div>
-      <div class="peers-area" id="peers-area">
-        <div style="text-align:center;color:var(--muted);font-size:14px;padding:32px 0">
-          Нажми «Подключиться» чтобы войти в голосовой канал
-        </div>
-      </div>
+      <div id="jitsi-container" style="flex:1;background:#000"></div>
     </div>
   </div>
 </div>
@@ -165,302 +151,56 @@ const firebaseConfig = {
   appId:             "1:1083191209970:web:4ac53b3ae90a7af405456b"
 };
 
-const STUN = {iceServers:[{urls:'stun:stun.l.google.com:19302'},{urls:'stun:stun1.l.google.com:19302'}]};
-const COLORS = ['#5865f2','#57f287','#fee75c','#eb459e','#ed4245','#00b0f4','#f47fff'];
+const JITSI_ROOM = 'nash-chat-zqnihab-2025';
+let jitsiApi = null;
 
-let myName='', myColor='', myId='', db;
-let lastAuthor='';
-let localStream=null, screenStream=null;
-let peers={};
-let inVoice=false, muted=false, sharing=false;
-let sigRef=null;
+function joinVoice(){
+  if(jitsiApi) return;
+  document.getElementById('btn-join').style.display='none';
+  document.getElementById('btn-leave').style.display='';
+  document.getElementById('vc-status').textContent='В голосовом канале';
+  document.getElementById('vc-status').className='vc-status on';
 
-function initials(n){ return n.split(' ').map(w=>w[0]).join('').toUpperCase().slice(0,2)||'?'; }
-function colorFor(n){ let h=0; for(let c of n) h=(h*31+c.charCodeAt(0))&0xffff; return COLORS[h%COLORS.length]; }
-function nowStr(){ return new Date().toLocaleTimeString('ru',{hour:'2-digit',minute:'2-digit'}); }
-function esc(t){ return t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
-function uid(){ return Date.now().toString(36)+Math.random().toString(36).slice(2,6); }
-
-function login(){
-  const val=document.getElementById('name-input').value.trim();
-  if(!val) return;
-  myName=val; myColor=colorFor(myName); myId=uid();
-
-  document.getElementById('me-av').textContent=initials(myName);
-  document.getElementById('me-av').style.background=myColor;
-  document.getElementById('me-name').textContent=myName;
-  document.getElementById('login-overlay').style.display='none';
-
-  firebase.initializeApp(firebaseConfig);
-  db=firebase.database();
-
-  const presRef=db.ref('presence/'+myId);
-  presRef.set({name:myName,color:myColor,id:myId});
-  presRef.onDisconnect().remove();
-
-  db.ref('presence').on('value',snap=>{
-    const users=Object.values(snap.val()||{});
-    document.getElementById('online-label').textContent=users.length+' онлайн';
-    document.getElementById('online-list').innerHTML=users.map(u=>`
-      <div class="online-user">
-        <div class="av" style="width:24px;height:24px;font-size:10px;background:${u.color}">${initials(u.name)}</div>
-        <span>${u.name}</span>
-      </div>`).join('');
-  });
-
-  db.ref('messages').limitToLast(200).on('child_added',snap=>addMessage(snap.val()));
-
-  sigRef=db.ref('voice/signals');
-  const joinTs=Date.now();
-  sigRef.on('child_added',snap=>{
-    const sig=snap.val();
-    if(!sig||sig.to!==myId||!inVoice) return;
-    if(sig.ts && sig.ts < joinTs-5000) return;
-    handleSignal(sig.from,sig);
-  });
-}
-
-document.getElementById('name-input').addEventListener('keydown',e=>{ if(e.key==='Enter') login(); });
-
-function sendMsg(){
-  const inp=document.getElementById('msg-input');
-  const text=inp.value.trim(); if(!text||!db) return;
-  inp.value='';
-  db.ref('messages').push({author:myName,color:myColor,text,time:nowStr()});
-}
-
-function addMessage(msg){
-  const el=document.getElementById('messages');
-  document.getElementById('empty-hint')?.remove();
-  const same=msg.author===lastAuthor; lastAuthor=msg.author;
-  if(!same){
-    const g=document.createElement('div'); g.className='msg-group';
-    g.innerHTML=`<div class="av" style="width:36px;height:36px;font-size:13px;background:${msg.color};margin-top:1px">${initials(msg.author)}</div>
-      <div class="msg-body"><div class="msg-meta"><span class="msg-author">${msg.author}</span><span class="msg-time">${msg.time}</span></div>
-      <div class="msg-text">${esc(msg.text)}</div></div>`;
-    el.appendChild(g);
-  } else {
-    const c=document.createElement('div'); c.className='msg-cont'; c.textContent=msg.text; el.appendChild(c);
-  }
-  el.scrollTop=el.scrollHeight;
-}
-
-function switchView(v){
-  ['text','voice'].forEach(x=>{
-    document.getElementById('view-'+x).classList.toggle('active',x===v);
-    document.getElementById('btn-'+x).classList.toggle('active',x===v);
-  });
-  const map={text:['#','общий','текстовый чат'],voice:['🔊','голосовой','голосовой канал']};
-  const [ico,title,sub]=map[v];
-  document.getElementById('h-icon').textContent=ico;
-  document.getElementById('h-title').textContent=title;
-  document.getElementById('h-sub').textContent=sub;
-}
-
-async function joinVoice(){
-  try{ localStream=await navigator.mediaDevices.getUserMedia({audio:true,video:false}); }
-  catch(e){ alert('Нет доступа к микрофону.\n\nОткрой файл через http:// или localhost, а не через file://\n\n'+e.message); return; }
-  inVoice=true;
-  setVoiceUI(true);
-  renderPeers();
-
-  const myPeerRef=db.ref('voice/peers/'+myId);
-  myPeerRef.set({name:myName,color:myColor,id:myId});
-  myPeerRef.onDisconnect().remove();
-
-  db.ref('voice/peers').on('value',async snap=>{
-    if(!inVoice) return;
-    const ps=snap.val()||{};
-    for(const [pid,info] of Object.entries(ps)){
-      if(pid===myId||peers[pid]) continue;
-      await createPeer(pid,info,true);
-    }
-    for(const pid of Object.keys(peers)){
-      if(!ps[pid]) removePeer(pid);
-    }
-    renderPeers();
-  });
-}
-
-async function createPeer(peerId,info,initiator){
-  const pc=new RTCPeerConnection(STUN);
-  peers[peerId]={pc,name:info.name||'?',color:info.color||'#5865f2'};
-
-  localStream.getTracks().forEach(t=>pc.addTrack(t,localStream));
-
-  pc.ontrack=e=>{
-    if(!peers[peerId]) return;
-    const stream=e.streams[0];
-    if(e.track.kind==='audio'){
-      let au=peers[peerId].audioEl;
-      if(!au){
-        au=document.createElement('audio');
-        au.autoplay=true;
-        au.setAttribute('playsinline','');
-        document.body.appendChild(au);
-        peers[peerId].audioEl=au;
-      }
-      au.srcObject=stream;
-      au.play().catch(()=>{});
-    }
-    if(e.track.kind==='video'){
-      peers[peerId].videoStream=stream; renderPeers();
-    }
+  const script=document.createElement('script');
+  script.src='https://meet.jit.si/external_api.js';
+  script.onload=()=>{
+    jitsiApi=new JitsiMeetExternalAPI('meet.jit.si',{
+      roomName: JITSI_ROOM,
+      parentNode: document.getElementById('jitsi-container'),
+      userInfo: { displayName: myName },
+      configOverwrite: {
+        startWithAudioMuted: false,
+        startWithVideoMuted: true,
+        prejoinPageEnabled: false,
+        disableDeepLinking: true,
+        toolbarButtons: [
+          'microphone','camera','desktop','chat',
+          'raisehand','tileview','hangup'
+        ],
+      },
+      interfaceConfigOverwrite: {
+        SHOW_JITSI_WATERMARK: false,
+        SHOW_BRAND_WATERMARK: false,
+        DEFAULT_BACKGROUND: '#1e1f22',
+        TOOLBAR_ALWAYS_VISIBLE: true,
+      },
+      height: '100%',
+      width: '100%',
+    });
+    jitsiApi.addEventListener('videoConferenceLeft',()=>leaveVoice());
   };
-
-  pc.onicecandidate=e=>{
-    if(e.candidate) sendSig(peerId,{type:'candidate',candidate:e.candidate});
-  };
-
-  pc.onconnectionstatechange=()=>{
-    if(['disconnected','failed','closed'].includes(pc.connectionState)) removePeer(peerId);
-  };
-
-  if(initiator){
-    const offer=await pc.createOffer();
-    await pc.setLocalDescription(offer);
-    sendSig(peerId,{type:'offer',sdp:offer});
-  }
-}
-
-async function handleSignal(fromId,sig){
-  if(sig.type==='offer'){
-    if(!peers[fromId]) await createPeer(fromId,{name:sig.name,color:sig.color},false);
-    const pc=peers[fromId].pc;
-    await pc.setRemoteDescription(sig.sdp);
-    const answer=await pc.createAnswer();
-    await pc.setLocalDescription(answer);
-    sendSig(fromId,{type:'answer',sdp:answer,name:myName,color:myColor});
-  } else if(sig.type==='answer'){
-    if(peers[fromId]) await peers[fromId].pc.setRemoteDescription(sig.sdp).catch(()=>{});
-  } else if(sig.type==='candidate'){
-    if(peers[fromId]) await peers[fromId].pc.addIceCandidate(sig.candidate).catch(()=>{});
-  } else if(sig.type==='screen-on'){
-    if(peers[fromId]){ peers[fromId].hasScreen=true; renderPeers(); }
-  } else if(sig.type==='screen-off'){
-    if(peers[fromId]){ peers[fromId].hasScreen=false; peers[fromId].videoStream=null; renderPeers(); }
-  }
-}
-
-function sendSig(toId,data){
-  sigRef.push({...data,from:myId,to:toId,name:myName,color:myColor,ts:Date.now()});
-}
-
-function removePeer(pid){
-  if(!peers[pid]) return;
-  try{ peers[pid].pc.close(); }catch(_){}
-  if(peers[pid].audioEl){
-    peers[pid].audioEl.srcObject=null;
-    peers[pid].audioEl.remove();
-  }
-  delete peers[pid];
-  renderPeers();
+  document.head.appendChild(script);
 }
 
 function leaveVoice(){
-  inVoice=false;
-  db.ref('voice/peers').off();
-  db.ref('voice/peers/'+myId).remove();
-  Object.keys(peers).forEach(removePeer);
-  localStream?.getTracks().forEach(t=>t.stop()); localStream=null;
-  screenStream?.getTracks().forEach(t=>t.stop()); screenStream=null;
-  sharing=false; muted=false;
-  setVoiceUI(false); renderPeers();
+  if(jitsiApi){ jitsiApi.dispose(); jitsiApi=null; }
+  document.getElementById('btn-join').style.display='';
+  document.getElementById('btn-leave').style.display='none';
+  document.getElementById('vc-status').textContent='Не подключён';
+  document.getElementById('vc-status').className='vc-status';
+  document.getElementById('jitsi-container').innerHTML='';
 }
 
-function toggleMute(){
-  if(!localStream) return;
-  muted=!muted;
-  localStream.getAudioTracks().forEach(t=>t.enabled=!muted);
-  const btn=document.getElementById('btn-mute');
-  btn.textContent=muted?'🔇 Микрофон выкл':'🎙 Микрофон вкл';
-  btn.classList.toggle('muted',muted);
-  renderPeers();
-}
-
-async function toggleScreen(){
-  if(sharing){ stopScreen(); return; }
-  try{
-    screenStream=await navigator.mediaDevices.getDisplayMedia({video:true,audio:true});
-  } catch(e){ return; }
-  sharing=true;
-  const track=screenStream.getVideoTracks()[0];
-  track.onended=stopScreen;
-
-  for(const [pid,p] of Object.entries(peers)){
-    try{
-      p.screenSender=p.pc.addTrack(track,screenStream);
-      sendSig(pid,{type:'screen-on'});
-    }catch(_){}
-  }
-
-  document.getElementById('btn-screen').textContent='🔴 Стоп трансляция';
-  document.getElementById('btn-screen').classList.add('sharing');
-  renderPeers();
-}
-
-function stopScreen(){
-  if(!sharing) return;
-  sharing=false;
-  screenStream?.getTracks().forEach(t=>t.stop()); screenStream=null;
-  for(const [pid,p] of Object.entries(peers)){
-    if(p.screenSender) try{ p.pc.removeTrack(p.screenSender); }catch(_){}
-    delete p.screenSender;
-    sendSig(pid,{type:'screen-off'});
-  }
-  document.getElementById('btn-screen').textContent='🖥 Показать экран';
-  document.getElementById('btn-screen').classList.remove('sharing');
-  renderPeers();
-}
-
-function setVoiceUI(on){
-  document.getElementById('btn-join').style.display=on?'none':'';
-  document.getElementById('btn-leave').style.display=on?'':'none';
-  document.getElementById('btn-mute').style.display=on?'':'none';
-  document.getElementById('btn-screen').style.display=on?'':'none';
-  const s=document.getElementById('vc-status');
-  s.textContent=on?'В голосовом канале':'Не подключён';
-  s.className='vc-status'+(on?' on':'');
-}
-
-function renderPeers(){
-  const area=document.getElementById('peers-area');
-  if(!inVoice){
-    area.innerHTML='<div style="text-align:center;color:var(--muted);font-size:14px;padding:32px 0">Нажми «Подключиться» чтобы войти в голосовой канал</div>';
-    return;
-  }
-
-  const tiles=[{id:'me',name:myName,color:myColor,videoStream:sharing?screenStream:null,isLocal:true}];
-  for(const [pid,p] of Object.entries(peers)){
-    tiles.push({id:pid,name:p.name,color:p.color,videoStream:p.videoStream||null});
-  }
-
-  const cols=tiles.length<=1?1:tiles.length<=4?2:3;
-  area.style.gridTemplateColumns=`repeat(${cols},1fr)`;
-  area.innerHTML='';
-
-  tiles.forEach(t=>{
-    const tile=document.createElement('div');
-    tile.className='peer-tile'+(t.isLocal?' local-tile':'');
-
-    if(t.videoStream){
-      const vid=document.createElement('video');
-      vid.autoplay=true; vid.muted=t.isLocal; vid.playsInline=true;
-      vid.srcObject=t.videoStream;
-      vid.style.cssText='width:100%;height:100%;object-fit:contain;background:#000;display:block';
-      tile.appendChild(vid);
-    } else {
-      const c=document.createElement('div'); c.className='peer-av-c';
-      c.innerHTML=`<div class="av" style="width:56px;height:56px;font-size:20px;background:${t.color}">${initials(t.name)}</div>`;
-      tile.appendChild(c);
-    }
-
-    const lbl=document.createElement('div'); lbl.className='peer-label';
-    lbl.textContent=(t.isLocal?'Вы: ':'')+t.name+(t.isLocal&&muted?' [выкл]':'');
-    tile.appendChild(lbl);
-    area.appendChild(tile);
-  });
-}
 </script>
 </body>
 </html>
