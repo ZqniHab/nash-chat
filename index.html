@@ -211,9 +211,11 @@ function login(){
   db.ref('messages').limitToLast(200).on('child_added',snap=>addMessage(snap.val()));
 
   sigRef=db.ref('voice/signals');
+  const joinTs=Date.now();
   sigRef.on('child_added',snap=>{
     const sig=snap.val();
     if(!sig||sig.to!==myId||!inVoice) return;
+    if(sig.ts && sig.ts < joinTs-5000) return;
     handleSignal(sig.from,sig);
   });
 }
@@ -288,12 +290,21 @@ async function createPeer(peerId,info,initiator){
 
   pc.ontrack=e=>{
     if(!peers[peerId]) return;
+    const stream=e.streams[0];
     if(e.track.kind==='audio'){
-      const au=new Audio(); au.autoplay=true; au.srcObject=e.streams[0];
-      peers[peerId].audioEl=au;
+      let au=peers[peerId].audioEl;
+      if(!au){
+        au=document.createElement('audio');
+        au.autoplay=true;
+        au.setAttribute('playsinline','');
+        document.body.appendChild(au);
+        peers[peerId].audioEl=au;
+      }
+      au.srcObject=stream;
+      au.play().catch(()=>{});
     }
     if(e.track.kind==='video'){
-      peers[peerId].videoStream=e.streams[0]; renderPeers();
+      peers[peerId].videoStream=stream; renderPeers();
     }
   };
 
@@ -338,7 +349,10 @@ function sendSig(toId,data){
 function removePeer(pid){
   if(!peers[pid]) return;
   try{ peers[pid].pc.close(); }catch(_){}
-  if(peers[pid].audioEl){ peers[pid].audioEl.srcObject=null; }
+  if(peers[pid].audioEl){
+    peers[pid].audioEl.srcObject=null;
+    peers[pid].audioEl.remove();
+  }
   delete peers[pid];
   renderPeers();
 }
